@@ -3,9 +3,13 @@ package com.edib.openwhispr
 import android.accessibilityservice.AccessibilityService
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
+import android.content.BroadcastReceiver
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.content.res.ColorStateList
 import android.graphics.Color
@@ -40,6 +44,10 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import java.io.ByteArrayOutputStream
+import java.text.SimpleDateFormat
+import java.util.ArrayDeque
+import java.util.Date
+import java.util.Locale
 import kotlin.concurrent.thread
 import kotlin.math.abs
 
@@ -74,6 +82,11 @@ class WhisperAccessibilityService : AccessibilityService() {
         private const val COLOR_REC_ACCENT = 0xFFFF6B6B.toInt()
         private const val COLOR_FEEDBACK_BG = 0xEE1C1C1E.toInt()
         private const val COLOR_RING = 0xFFE8EAED.toInt()
+
+        // [TEMP debug] overlay desync diagnostics
+        private const val DBG_TAG = "OverlayDbg"
+        private const val DBG_MAX_LINES = 400
+        private const val ACTION_COPY_DEBUG_LOG = "com.edib.openwhispr.COPY_DEBUG_LOG"
     }
 
     private enum class State { IDLE, RECORDING, TRANSCRIBING }
@@ -107,6 +120,67 @@ class WhisperAccessibilityService : AccessibilityService() {
     private var audioRecord: AudioRecord? = null
     private var stopTone: ToneGenerator? = null
     private var pcmStream: ByteArrayOutputStream? = null
+
+    // ---- [TEMP debug] overlay desync diagnostics ----
+    private val dbgLines = ArrayDeque<String>()
+    private val dbgTime = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
+    private var dbgMismatchCount = 0
+    private var dbgReceiverRegistered = false
+
+    @Synchronized
+    private fun dbg(msg: String) {
+        Log.d(DBG_TAG, msg)
+        dbgLines.addLast("${dbgTime.format(Date())} $msg")
+        while (dbgLines.size > DBG_MAX_LINES) dbgLines.removeFirst()
+    }
+
+    private fun overlaySnapshot(): String {
+        val v = overlayView ?: return "view=null"
+        val vis = when (v.visibility) {
+            View.VISIBLE -> "V"
+            View.INVISIBLE -> "I"
+            else -> "G"
+        }
+        val touchable = ((layoutParams?.flags ?: 0) and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) == 0
+        return "vis=$vis alpha=${"%.2f".format(Locale.US, v.alpha)} attached=${v.isAttachedToWindow} " +
+            "shown=${v.isShown} winVis=${v.windowVisibility} touchable=$touchable"
+    }
+
+    private fun signalSnapshot() =
+        "a11y=$accessibilityFocusSignal ime=$imeVisibleSignal state=$state master=${masterEnabled()} overlayShown=$overlayShown"
+
+    private fun dbgCheckDesync() {
+        val v = overlayView
+        val actuallyVisible = v != null && v.isAttachedToWindow &&
+            v.visibility == View.VISIBLE && v.alpha >= 0.1f
+        if (actuallyVisible != overlayShown) {
+            dbgMismatchCount++
+            if (dbgMismatchCount == 2 || dbgMismatchCount % 20 == 0) {
+                dbg("!!! DESYNC overlayShown=$overlayShown actuallyVisible=$actuallyVisible (x$dbgMismatchCount) | ${overlaySnapshot()} | ${signalSnapshot()}")
+            }
+        } else {
+            if (dbgMismatchCount >= 2) dbg("--- desync cleared | ${overlaySnapshot()}")
+            dbgMismatchCount = 0
+        }
+    }
+
+    private val dbgReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            copyDebugLog()
+        }
+    }
+
+    @Synchronized
+    private fun copyDebugLog() {
+        val header = "OpenWispr overlay debug | ${Build.MANUFACTURER} ${Build.MODEL} SDK ${Build.VERSION.SDK_INT}\n" +
+            "NOW: ${overlaySnapshot()} | ${signalSnapshot()}\n"
+        val text = header + dbgLines.joinToString("\n")
+        (getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
+            .setPrimaryClip(ClipData.newPlainText("overlay-debug-log", text))
+        toast("Debug log copied (${dbgLines.size} lines)")
+    }
+    // ---- end [TEMP debug] ----
+
     private val handler = Handler(Looper.getMainLooper())
     private val hideFeedback = Runnable {
         feedbackView?.animate()?.alpha(0f)?.setDuration(180)?.withEndAction {
@@ -116,6 +190,7 @@ class WhisperAccessibilityService : AccessibilityService() {
     private val focusPoller = object : Runnable {
         override fun run() {
             refreshAccessibilityFocusSignal()
+            dbgCheckDesync() // [TEMP debug]
             handler.postDelayed(this, FOCUS_POLL_MS)
         }
     }
@@ -132,6 +207,27 @@ class WhisperAccessibilityService : AccessibilityService() {
 
     override fun onServiceConnected() {
         instance = this
+        // [TEMP debug]
+        dbg("SERVICE connected")
+        try {
+            if (dbgReceiverRegistered) {
+                unregisterReceiver(dbgReceiver)
+                dbgReceiverRegistered = false
+            }
+        } catch (_: Exception) {
+        }
+        try {
+            val filter = IntentFilter(ACTION_COPY_DEBUG_LOG)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                registerReceiver(dbgReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            } else {
+                registerReceiver(dbgReceiver, filter)
+            }
+            dbgReceiverRegistered = true
+        } catch (e: Exception) {
+            Log.e(TAG, "debug receiver registration failed", e)
+        }
+        // [/TEMP debug]
         try {
             stopTone?.release()
             stopTone = ToneGenerator(AudioManager.STREAM_NOTIFICATION, 70)
@@ -153,6 +249,16 @@ class WhisperAccessibilityService : AccessibilityService() {
         // could take the service down entirely, requiring the user to clear
         // app storage and re-grant the accessibility permission.
         try {
+            // [TEMP debug]
+            event?.let {
+                when (it.eventType) {
+                    AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED,
+                    AccessibilityEvent.TYPE_WINDOWS_CHANGED,
+                    AccessibilityEvent.TYPE_VIEW_FOCUSED ->
+                        dbg("EVENT ${AccessibilityEvent.eventTypeToString(it.eventType)} pkg=${it.packageName}")
+                }
+            }
+            // [/TEMP debug]
             refreshAccessibilityFocusSignal()
         } catch (e: Exception) {
             Log.e(TAG, "onAccessibilityEvent handling failed", e)
@@ -163,6 +269,16 @@ class WhisperAccessibilityService : AccessibilityService() {
 
     override fun onDestroy() {
         instance = null
+        // [TEMP debug]
+        dbg("SERVICE onDestroy")
+        try {
+            if (dbgReceiverRegistered) {
+                unregisterReceiver(dbgReceiver)
+                dbgReceiverRegistered = false
+            }
+        } catch (_: Exception) {
+        }
+        // [/TEMP debug]
         stopTone?.release()
         stopTone = null
         handler.removeCallbacks(focusPoller)
@@ -201,6 +317,16 @@ class WhisperAccessibilityService : AccessibilityService() {
                 .setPriority(NotificationCompat.PRIORITY_MIN)
                 .setOngoing(true)
                 .setSilent(true)
+                // [TEMP debug] one-tap copy of the overlay debug log
+                .addAction(
+                    R.drawable.ic_mic,
+                    "Copy debug log",
+                    PendingIntent.getBroadcast(
+                        this, 0,
+                        Intent(ACTION_COPY_DEBUG_LOG).setPackage(packageName),
+                        PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+                    )
+                )
                 .build()
 
             if (Build.VERSION.SDK_INT >= 34) {
@@ -281,8 +407,15 @@ class WhisperAccessibilityService : AccessibilityService() {
             // The foreground app's own tree is only one witness: web-based
             // composers (the Claude app's Code tab) often don't report an
             // editable focus at all. The other two come from the system.
-            accessibilityFocusSignal = (focused != null && isEditableTextField(focused)) ||
-                hasActiveTextInput() || isKeyboardWindowShown()
+            // [TEMP debug] components split out so changes can be logged.
+            val editableFocus = focused != null && isEditableTextField(focused)
+            val activeInput = hasActiveTextInput()
+            val kbWindow = isKeyboardWindowShown()
+            val newValue = editableFocus || activeInput || kbWindow
+            if (newValue != accessibilityFocusSignal) {
+                dbg("SIGNAL a11y $accessibilityFocusSignal -> $newValue (editableFocus=$editableFocus activeInput=$activeInput kbWindow=$kbWindow rootNull=${root == null} pkg=${root?.packageName})")
+            }
+            accessibilityFocusSignal = newValue
             focused?.recycle()
             root?.recycle()
         } catch (e: Exception) {
@@ -321,6 +454,7 @@ class WhisperAccessibilityService : AccessibilityService() {
      * focus events at all, since this signal comes from the window manager
      * rather than the foreground app's own accessibility tree. */
     private fun onKeyboardVisibilityChanged(visible: Boolean) {
+        if (visible != imeVisibleSignal) dbg("SIGNAL ime $imeVisibleSignal -> $visible") // [TEMP debug]
         imeVisibleSignal = visible
         updateOverlayVisibility()
     }
@@ -329,6 +463,7 @@ class WhisperAccessibilityService : AccessibilityService() {
         val shouldShow = masterEnabled() &&
             (accessibilityFocusSignal || imeVisibleSignal || state != State.IDLE)
         if (shouldShow == overlayShown) return
+        dbg("TOGGLE -> shouldShow=$shouldShow | ${signalSnapshot()} | ${overlaySnapshot()}") // [TEMP debug]
         overlayShown = shouldShow
         if (shouldShow) animateOverlayIn() else animateOverlayOut()
     }
@@ -344,7 +479,8 @@ class WhisperAccessibilityService : AccessibilityService() {
 
     private fun animateOverlayIn() {
         handler.post {
-            val view = overlayView ?: return@post
+            val view = overlayView ?: run { dbg("IN skipped: overlayView null"); return@post }
+            dbg("IN begin | ${overlaySnapshot()}") // [TEMP debug]
             view.animate().cancel()
             if (view.visibility != View.VISIBLE) {
                 view.visibility = View.VISIBLE
@@ -362,13 +498,15 @@ class WhisperAccessibilityService : AccessibilityService() {
 
     private fun animateOverlayOut() {
         handler.post {
-            val view = overlayView ?: return@post
+            val view = overlayView ?: run { dbg("OUT skipped: overlayView null"); return@post }
+            dbg("OUT begin | ${overlaySnapshot()}") // [TEMP debug]
             view.animate().cancel()
             view.animate()
                 .alpha(0f)
                 .setDuration(FADE_OUT_MS)
                 .setInterpolator(AccelerateInterpolator())
                 .withEndAction {
+                    dbg("OUT end -> INVISIBLE") // [TEMP debug]
                     view.visibility = View.INVISIBLE
                     setTouchable(false)
                 }
@@ -642,6 +780,7 @@ class WhisperAccessibilityService : AccessibilityService() {
 
     private fun setOpacity(active: Boolean) {
         handler.post {
+            dbg("setOpacity active=$active | ${overlaySnapshot()}") // [TEMP debug]
             overlayView?.animate()?.cancel()
             overlayView?.animate()
                 ?.alpha(if (active) ALPHA_ACTIVE else ALPHA_IDLE)
