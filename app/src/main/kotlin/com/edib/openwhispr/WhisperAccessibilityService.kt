@@ -175,16 +175,9 @@ class WhisperAccessibilityService : AccessibilityService() {
         val header = "OpenWispr overlay debug | ${Build.MANUFACTURER} ${Build.MODEL} SDK ${Build.VERSION.SDK_INT}\n" +
             "NOW: ${overlaySnapshot()} | ${signalSnapshot()}\n"
         val text = header + dbgLines.joinToString("\n")
-        
-        // Pano kopyalama ayarını kontrol et (debug log için)
-        val isCopyToClipboardEnabled = prefs().getBoolean("copy_to_clipboard", true)
-        if (isCopyToClipboardEnabled) {
-            (getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
-                .setPrimaryClip(ClipData.newPlainText("overlay-debug-log", text))
-            toast("Debug log copied (${dbgLines.size} lines)")
-        } else {
-            toast("Debug log ready, but clipboard copying is disabled in settings.")
-        }
+        (getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
+            .setPrimaryClip(ClipData.newPlainText("overlay-debug-log", text))
+        toast("Debug log copied (${dbgLines.size} lines)")
     }
     // ---- end [TEMP debug] ----
 
@@ -1146,19 +1139,9 @@ class WhisperAccessibilityService : AccessibilityService() {
             candidates.forEach { it.recycle() }
         }
 
-        // Kopyalama ayarını kontrol et
-        val isCopyToClipboardEnabled = prefs().getBoolean("copy_to_clipboard", true)
-
         // [privacy] Replacement uses ACTION_SET_TEXT (no clipboard), so the
         // clipboard is only used as the fallback when it fails.
-        if (!replaced) {
-            // Eğer yapıştırma başarısız olduysa, veri kaybını önlemek için ayar kapalı olsa bile panoya kopyalar
-            copyToClipboard(text)
-        } else if (isCopyToClipboardEnabled) {
-            // Yapıştırma başarılıysa ve ayar açıksa yine de kopyala
-            copyToClipboard(text)
-        }
-        
+        if (!replaced) copyToClipboard(text)
         Log.i(TAG, if (replaced) "Command replace succeeded" else "Command replace failed; clipboard fallback only")
         showFeedback(
             getString(if (replaced) R.string.command_applied else R.string.replace_failed_clipboard),
@@ -1208,7 +1191,7 @@ class WhisperAccessibilityService : AccessibilityService() {
         feedback: String? = getString(R.string.copied_to_clipboard),
         feedbackDurationMs: Long = 2000
     ): Boolean {
-        val isCopyToClipboardEnabled = prefs().getBoolean("copy_to_clipboard", true)
+        copyToClipboard(text)
 
         val candidates = findInjectionCandidates()
         Log.i(TAG, "Injecting text into ${candidates.size} candidate node(s)")
@@ -1216,25 +1199,13 @@ class WhisperAccessibilityService : AccessibilityService() {
         var injected = false
         try {
             for (candidate in candidates) {
-                // Eğer doğrudan yapıştırma (ACTION_PASTE) yapacaksak pano zorunludur
-                // Önce custom paste ya da setText ile şansımızı deneriz, 
-                // eğer olmazsa ve clipboard lazımsa o zaman panoya atarız.
-                
-                if (tryInjectIntoNode(candidate, text, isCopyToClipboardEnabled)) {
+                if (tryInjectIntoNode(candidate, text)) {
                     injected = true
                     break
                 }
             }
         } finally {
             candidates.forEach { it.recycle() }
-        }
-        
-        // Eğer hiçbir hedefe metni yazamadıysa (örneğin odak yoksa), metni kaybetmemek için panoya MECBUREN kopyalar
-        if (!injected) {
-             copyToClipboard(text)
-        } else if (isCopyToClipboardEnabled) {
-             // Metin başarıyla alana yazıldı ve kullanıcı "Panoya Kopyala" ayarını açık bıraktıysa yine kopyalar
-             copyToClipboard(text)
         }
 
         Log.i(TAG, if (injected) "Text injection action reported success" else "No injection action succeeded; clipboard fallback only")
@@ -1328,25 +1299,17 @@ class WhisperAccessibilityService : AccessibilityService() {
         return score
     }
 
-    private fun tryInjectIntoNode(node: AccessibilityNodeInfo, text: String, isCopyToClipboardEnabled: Boolean = true): Boolean {
+    private fun tryInjectIntoNode(node: AccessibilityNodeInfo, text: String): Boolean {
         logNode("Trying node", node)
 
         node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
 
         findCustomPasteAction(node)?.let { action ->
-            // Eğer özel yapıştır metodu (action_paste) kullanılacaksa, metin mecburen panoya atılır
-            if (!isCopyToClipboardEnabled) {
-                copyToClipboard(text)
-            }
             val ok = node.performAction(action.id)
             Log.i(TAG, "Custom action '${action.label}' (${action.id}) => $ok")
             if (ok) return true
         }
 
-        // Eğer standart yapıştır metodu (action_paste) kullanılacaksa, metin mecburen panoya atılır
-        if (!isCopyToClipboardEnabled) {
-             copyToClipboard(text)
-        }
         val pasteOk = node.performAction(AccessibilityNodeInfo.ACTION_PASTE)
         Log.i(TAG, "ACTION_PASTE => $pasteOk")
         if (pasteOk) return true
