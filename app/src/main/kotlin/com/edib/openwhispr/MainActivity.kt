@@ -55,8 +55,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var customInstructionsRowSub: TextView
     private lateinit var customInstructionsRow: LinearLayout
     private lateinit var cleanupProviderRow: LinearLayout
-    private lateinit var languageRowSub: TextView
-    private lateinit var languageRow: LinearLayout
     private lateinit var modelContainer: LinearLayout
     private lateinit var voiceCommandsDetailContainer: LinearLayout
     private lateinit var triggerPhraseRowSub: TextView
@@ -73,8 +71,7 @@ class MainActivity : AppCompatActivity() {
         val radio: MaterialRadioButton,
         val progress: LinearProgressIndicator,
         val subtitle: TextView,
-        val dlBtn: MaterialButton,
-        val delBtn: MaterialButton,
+        val dlBtn: MaterialButton
     )
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -263,12 +260,6 @@ class MainActivity : AppCompatActivity() {
         modelContainer.addView(modelGroup)
         dictationContainer.addView(modelContainer)
 
-        languageRow = settingsRow(getString(R.string.transcription_languages), "") {
-            promptTranscriptionLanguages()
-        }
-        languageRowSub = languageRow.findViewWithTag("subtitle")
-        dictationContainer.addView(group().apply { addView(languageRow) })
-
         dictationContainer.addView(sectionHeader(getString(R.string.text_enhancement)))
         val postGroup = group()
 
@@ -407,29 +398,25 @@ class MainActivity : AppCompatActivity() {
         settingsContainer.addView(sectionHeader(getString(R.string.about)))
         val aboutGroup = group()
         aboutGroup.addView(settingsRow(getString(R.string.language), getString(R.string.language_summary)) {
-            // Native names for the new locales; "" follows the system.
-            val options = listOf(
-                getString(R.string.system_default) to "",
-                getString(R.string.english) to "en",
-                getString(R.string.french) to "fr",
-                "Italiano" to "it",
-                "Español" to "es",
-                "Русский" to "ru",
-                "日本語" to "ja",
-                "Português (Brasil)" to "pt-BR",
-                "中文 (简体)" to "zh-CN",
+            val languages = arrayOf(
+                getString(R.string.system_default),
+                getString(R.string.english),
+                getString(R.string.french)
             )
-            val appTag = AppCompatDelegate.getApplicationLocales().get(0)?.toLanguageTag()
-            val selected = options.indexOfFirst { (_, tag) ->
-                if (tag.isEmpty()) appTag == null
-                else appTag == tag || appTag?.substringBefore('-') == tag.substringBefore('-')
-            }.coerceAtLeast(0)
+            val appLocales = AppCompatDelegate.getApplicationLocales()
+            val selected = when {
+                appLocales.isEmpty -> 0
+                appLocales.get(0)?.language == "fr" -> 2
+                else -> 1
+            }
             android.app.AlertDialog.Builder(this)
                 .setTitle(R.string.language)
-                .setSingleChoiceItems(options.map { it.first }.toTypedArray(), selected) { dialog, which ->
-                    val tag = options[which].second
-                    val locales = if (tag.isEmpty()) LocaleListCompat.getEmptyLocaleList()
-                        else LocaleListCompat.forLanguageTags(tag)
+                .setSingleChoiceItems(languages, selected) { dialog, which ->
+                    val locales = when (which) {
+                        0 -> LocaleListCompat.getEmptyLocaleList()
+                        1 -> LocaleListCompat.forLanguageTags("en")
+                        else -> LocaleListCompat.forLanguageTags("fr")
+                    }
                     AppCompatDelegate.setApplicationLocales(locales)
                     dialog.dismiss()
                 }
@@ -522,15 +509,6 @@ class MainActivity : AppCompatActivity() {
             setTextColor(attrColor(androidx.appcompat.R.attr.colorPrimary))
         }
 
-        val delBtn = MaterialButton(this, null, com.google.android.material.R.attr.materialIconButtonStyle).apply {
-            text = "✕"
-            contentDescription = getString(R.string.delete_model, model.name)
-            textSize = 16f
-            setTextColor(attrColor(android.R.attr.textColorSecondary))
-            visibility = View.GONE
-            setOnClickListener { confirmDeleteModel(model) }
-        }
-
         val progress = LinearProgressIndicator(this).apply {
             visibility = View.GONE
             layoutParams = LinearLayout.LayoutParams(LP_MATCH, dp(4)).apply {
@@ -541,7 +519,6 @@ class MainActivity : AppCompatActivity() {
         val rightContainer = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            addView(delBtn)
             addView(dlBtn)
             addView(radio)
         }
@@ -558,7 +535,7 @@ class MainActivity : AppCompatActivity() {
         textContainer.addView(progress)
 
         modelRows[model.archive] = ModelRowViews(
-            radio, progress, textContainer.findViewWithTag("subtitle"), dlBtn, delBtn
+            radio, progress, textContainer.findViewWithTag("subtitle"), dlBtn
         )
         refreshCard(model)
 
@@ -624,31 +601,10 @@ class MainActivity : AppCompatActivity() {
         views.radio.isChecked = active
         views.radio.visibility = if (installed) View.VISIBLE else View.GONE
         views.dlBtn.visibility = if (installed) View.GONE else View.VISIBLE
-        views.delBtn.visibility = if (installed && !active) View.VISIBLE else View.GONE
 
         if (views.progress.visibility == View.GONE) {
-            val specs = getString(R.string.model_specs, getString(model.qualityResId), model.sizeMb)
-            val needed = TranscriptionLanguages.saved(prefs())
-            views.subtitle.text = if (needed.isEmpty()) specs else {
-                val missing = needed - model.languages
-                val coverage = if (missing.isEmpty()) getString(R.string.model_covers_languages)
-                    else getString(R.string.model_missing_languages, missing.joinToString { TranscriptionLanguages.displayName(it) })
-                "$specs\n$coverage"
-            }
+            views.subtitle.text = getString(R.string.model_specs, getString(model.qualityResId), model.sizeMb)
         }
-    }
-
-    private fun confirmDeleteModel(model: Model) {
-        android.app.AlertDialog.Builder(this)
-            .setTitle(getString(R.string.delete_model_title, model.name))
-            .setMessage(R.string.delete_model_message)
-            .setPositiveButton(R.string.delete) { _, _ ->
-                ModelDownloader.delete(this, model)
-                refreshAllCards()
-                refresh()
-            }
-            .setNegativeButton(R.string.cancel, null)
-            .show()
     }
 
     private fun refreshAllCards() = MODEL_CATALOG.forEach { refreshCard(it) }
@@ -699,7 +655,6 @@ class MainActivity : AppCompatActivity() {
         batteryDot.background = dotDrawable(if (unrestricted) DOT_GREEN else DOT_RED)
 
         modelContainer.visibility = if (useLocal) View.VISIBLE else View.GONE
-        languageRowSub.text = languageSummary()
         customInstructionsRow.visibility = if (usePostProcessing) View.VISIBLE else View.GONE
         cleanupProviderRow.visibility = if (usePostProcessing) View.VISIBLE else View.GONE
         cleanupProviderRowSub.text = cleanupProviderSummary()
@@ -985,100 +940,6 @@ class MainActivity : AppCompatActivity() {
             }
             .setNegativeButton(getString(R.string.cancel), null)
             .show()
-    }
-
-    private fun languageSummary(): String {
-        val selected = TranscriptionLanguages.saved(prefs())
-        if (selected.isEmpty()) return getString(R.string.transcription_languages_auto)
-        return TranscriptionLanguages.ordered(selected)
-            .filter { it in selected }
-            .joinToString(", ") { TranscriptionLanguages.displayName(it) }
-    }
-
-    /** Searchable checklist; selected languages stay on top. Save with no
-     * selection (or the Auto button) returns to auto-detect. */
-    private fun promptTranscriptionLanguages() {
-        val working = TranscriptionLanguages.saved(prefs()).toMutableSet()
-        val search = EditText(this).apply {
-            hint = getString(R.string.transcription_languages_search)
-            inputType = InputType.TYPE_CLASS_TEXT
-        }
-        val list = vertical(0)
-        fun renderList(query: String) {
-            list.removeAllViews()
-            val q = query.trim()
-            TranscriptionLanguages.ordered(working)
-                .filter { q.isEmpty() || TranscriptionLanguages.displayName(it).contains(q, ignoreCase = true) || it.contains(q, ignoreCase = true) }
-                .forEach { code ->
-                    list.addView(CheckBox(this).apply {
-                        text = "${TranscriptionLanguages.displayName(code)} ($code)"
-                        isChecked = code in working
-                        setOnCheckedChangeListener { _, checked ->
-                            if (checked) working.add(code) else working.remove(code)
-                        }
-                    })
-                }
-        }
-        search.addTextChangedListener(object : android.text.TextWatcher {
-            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
-            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
-            override fun afterTextChanged(s: android.text.Editable?) = renderList(s?.toString().orEmpty())
-        })
-        renderList("")
-        val container = vertical(dp(24), dp(8)).apply {
-            addView(search)
-            addView(ScrollView(this@MainActivity).apply {
-                addView(list)
-                layoutParams = LinearLayout.LayoutParams(LP_MATCH, dp(360))
-            })
-        }
-        android.app.AlertDialog.Builder(this)
-            .setTitle(R.string.transcription_languages)
-            .setView(container)
-            .setPositiveButton(R.string.save) { _, _ -> saveTranscriptionLanguages(working) }
-            .setNeutralButton(R.string.transcription_languages_auto) { _, _ -> saveTranscriptionLanguages(emptySet()) }
-            .setNegativeButton(R.string.cancel, null)
-            .show()
-    }
-
-    private fun saveTranscriptionLanguages(selected: Set<String>) {
-        prefs().edit().putStringSet(TranscriptionLanguages.PREF_KEY, selected.toSet()).apply()
-        refresh()
-        if (prefs().getBoolean("use_local", true)) WhisperAccessibilityService.instance?.reloadModel()
-        suggestModelForLanguages(selected)
-    }
-
-    /** Offers a local model that covers [needed] when the current one doesn't.
-     * Cloud transcription already covers every Whisper language, so no prompt there. */
-    private fun suggestModelForLanguages(needed: Set<String>) {
-        if (needed.isEmpty() || !prefs().getBoolean("use_local", true)) return
-        val current = MODEL_CATALOG.firstOrNull { it.archive == prefs().getString("model_name", "") }
-        if (current?.languages?.containsAll(needed) == true) return
-
-        val fits = MODEL_CATALOG.filter { it.languages.containsAll(needed) }
-        val names = needed.joinToString { TranscriptionLanguages.displayName(it) }
-        val installedFit = fits.filter { ModelDownloader.isInstalled(this, it) }
-        if (installedFit.isNotEmpty()) {
-            val target = installedFit.sortedByDescending { it.sizeMb }.first()
-            android.app.AlertDialog.Builder(this)
-                .setTitle(R.string.language_switch_title)
-                .setMessage(getString(R.string.language_switch_message, target.name, names))
-                .setPositiveButton(R.string.language_switch_action) { _, _ -> selectModel(target.archive) }
-                .setNegativeButton(R.string.language_keep_current, null)
-                .show()
-        } else {
-            val best = fits.sortedByDescending { it.sizeMb }.first()
-            android.app.AlertDialog.Builder(this)
-                .setTitle(R.string.language_no_model_title)
-                .setMessage(getString(R.string.language_no_model_message, best.name, names))
-                .setPositiveButton(getString(R.string.language_download_model, best.name)) { _, _ -> onModelAction(best) }
-                .setNeutralButton(R.string.language_use_cloud) { _, _ ->
-                    prefs().edit().putBoolean("use_local", false).apply()
-                    refresh()
-                }
-                .setNegativeButton(R.string.language_keep_current, null)
-                .show()
-        }
     }
 
     private fun promptCleanupProvider() {
