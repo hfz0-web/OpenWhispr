@@ -326,6 +326,25 @@ class MainActivity : AppCompatActivity() {
         // ================= Settings tab =================
 
         settingsContainer.addView(sectionHeader(getString(R.string.tab_settings)))
+
+        // --- Copy to Clipboard Option ---
+        val copyToClipboardEnabled = prefs().getBoolean("copy_to_clipboard", true)
+        val copyToClipboardSwitch = MaterialSwitch(this).apply {
+            isChecked = copyToClipboardEnabled
+            isClickable = false
+        }
+        val copyToClipboardRow = settingsRow(
+            "Copy to clipboard",
+            "Automatically copy dictated text to clipboard",
+            copyToClipboardSwitch
+        ) {
+            val newVal = !copyToClipboardSwitch.isChecked
+            prefs().edit().putBoolean("copy_to_clipboard", newVal).apply()
+            copyToClipboardSwitch.isChecked = newVal
+        }
+        settingsContainer.addView(group().apply { addView(copyToClipboardRow) })
+        // ---------------------------------
+
         settingsContainer.addView(settingsRow(
             getString(R.string.dictionary_title),
             Dictionary.load(prefs()).let {
