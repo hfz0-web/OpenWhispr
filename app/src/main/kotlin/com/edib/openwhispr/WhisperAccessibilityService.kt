@@ -25,6 +25,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.PersistableBundle
+import android.os.SystemClock
 import android.text.InputType
 import android.util.Log
 import android.view.Gravity
@@ -64,6 +65,9 @@ class WhisperAccessibilityService : AccessibilityService() {
         private const val ALPHA_FADE_MS = 150L
         private const val FADE_IN_MS = 160L
         private const val FADE_OUT_MS = 140L
+        // Extra time past a fade's duration before the watchdog checks that the
+        // animation really reached its end state (see reconcileOverlay).
+        private const val FADE_SLACK_MS = 250L
 
         // How often we re-check the focused node as a failsafe, in case an
         // app never fires a focus-related accessibility event at all.
@@ -191,6 +195,7 @@ class WhisperAccessibilityService : AccessibilityService() {
         override fun run() {
             refreshAccessibilityFocusSignal()
             dbgCheckDesync() // [TEMP debug]
+            reconcileOverlay("poll")
             handler.postDelayed(this, FOCUS_POLL_MS)
         }
     }
@@ -282,6 +287,7 @@ class WhisperAccessibilityService : AccessibilityService() {
         stopTone?.release()
         stopTone = null
         handler.removeCallbacks(focusPoller)
+        handler.removeCallbacks(fadeWatchdog)
         try {
             stopForeground(STOP_FOREGROUND_REMOVE)
         } catch (e: Exception) {
@@ -477,6 +483,51 @@ class WhisperAccessibilityService : AccessibilityService() {
         handler.post { updateOverlayVisibility() }
     }
 
+    private fun targetAlpha() = if (state == State.IDLE) ALPHA_IDLE else ALPHA_ACTIVE
+
+    // Uptime of the most recent fade start; reconcileOverlay leaves the view
+    // alone until that fade has had time to finish.
+    private var lastFadeStartMs = 0L
+    private val fadeWatchdog = Runnable { reconcileOverlay("watchdog") }
+
+    private fun scheduleFadeWatchdog(fadeMs: Long) {
+        lastFadeStartMs = SystemClock.uptimeMillis()
+        handler.removeCallbacks(fadeWatchdog)
+        handler.postDelayed(fadeWatchdog, fadeMs + FADE_SLACK_MS)
+    }
+
+    /**
+     * Forces the overlay into the state [overlayShown] says it should be in.
+     *
+     * The fade animations are not guaranteed to run to completion: when the
+     * foreground app changes right as the overlay fades in (focus moving
+     * between WhatsApp/Telegram/launcher, ...), the ViewPropertyAnimator can
+     * be dropped, leaving the bubble VISIBLE at alpha 0 with overlayShown=true
+     * -- invisible, yet every later toggle is a no-op because overlayShown
+     * already matches. Called by the fade watchdog and the focus poller so the
+     * view can never stay out of sync with the flag.
+     */
+    private fun reconcileOverlay(reason: String) {
+        val view = overlayView ?: return
+        if (!view.isAttachedToWindow) return
+        if (SystemClock.uptimeMillis() - lastFadeStartMs < FADE_IN_MS + FADE_SLACK_MS) return
+        if (overlayShown) {
+            if (view.visibility != View.VISIBLE || view.alpha < 0.1f) {
+                dbg("RECONCILE($reason) force show | ${overlaySnapshot()}") // [TEMP debug]
+                view.animate().cancel()
+                view.visibility = View.VISIBLE
+                view.alpha = targetAlpha()
+                setTouchable(true)
+            }
+        } else if (view.visibility == View.VISIBLE) {
+            dbg("RECONCILE($reason) force hide | ${overlaySnapshot()}") // [TEMP debug]
+            view.animate().cancel()
+            view.alpha = 0f
+            view.visibility = View.INVISIBLE
+            setTouchable(false)
+        }
+    }
+
     private fun animateOverlayIn() {
         handler.post {
             val view = overlayView ?: run { dbg("IN skipped: overlayView null"); return@post }
@@ -487,9 +538,9 @@ class WhisperAccessibilityService : AccessibilityService() {
                 view.alpha = 0f
             }
             setTouchable(true)
-            val target = if (state == State.IDLE) ALPHA_IDLE else ALPHA_ACTIVE
+            scheduleFadeWatchdog(FADE_IN_MS)
             view.animate()
-                .alpha(target)
+                .alpha(targetAlpha())
                 .setDuration(FADE_IN_MS)
                 .setInterpolator(DecelerateInterpolator())
                 .start()
@@ -501,6 +552,7 @@ class WhisperAccessibilityService : AccessibilityService() {
             val view = overlayView ?: run { dbg("OUT skipped: overlayView null"); return@post }
             dbg("OUT begin | ${overlaySnapshot()}") // [TEMP debug]
             view.animate().cancel()
+            scheduleFadeWatchdog(FADE_OUT_MS)
             view.animate()
                 .alpha(0f)
                 .setDuration(FADE_OUT_MS)
